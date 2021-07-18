@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Benjamin Martin
+ * Copyright 2021 Benjamin Martin
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,13 +20,17 @@ import net.lapismc.afkplus.AFKPlus;
 import net.lapismc.afkplus.api.AFKActionEvent;
 import net.lapismc.afkplus.api.AFKStartEvent;
 import net.lapismc.afkplus.api.AFKStopEvent;
+import net.lapismc.afkplus.util.EssentialsAFKHook;
 import net.lapismc.lapiscore.compatibility.XSound;
 import org.bukkit.Bukkit;
-import org.bukkit.Sound;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.metadata.MetadataValue;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.Date;
+import java.util.Optional;
 import java.util.UUID;
 import org.bukkit.GameMode;
 import org.bukkit.scoreboard.Team;
@@ -43,7 +47,8 @@ public class AFKPlusPlayer {
     private Long lastInteract;
     private Long afkStart;
     private boolean isAFK;
-//    private boolean isInactive;
+    private boolean isFakeAFK;
+    // private boolean isInactive;
     private boolean isWarned;
     private GameMode previousGameMode;
     private boolean disabled;
@@ -52,7 +57,8 @@ public class AFKPlusPlayer {
         this.plugin = plugin;
         this.uuid = uuid;
         isAFK = false;
-//        isInactive = false;
+        isFakeAFK = false;
+        // isInactive = false;
         isWarned = false;
         lastInteract = System.currentTimeMillis();
         previousGameMode = null;
@@ -109,19 +115,9 @@ public class AFKPlusPlayer {
             return;
         }
         //Send the player the warning message
-        p.sendMessage(plugin.config.getMessage("Warning"));
-        //Check if warning sounds are enabled
-        if (!"".equals(plugin.getConfig().getString("WarningSound"))) {
-            //Get the sound from Compat Bridge
-            Sound sound;
-            try {
-                sound = XSound.valueOf(plugin.getConfig().getString("WarningSound")).parseSound();
-            } catch (IllegalArgumentException e) {
-                sound = XSound.ENTITY_PLAYER_LEVELUP.parseSound();
-            }
-            //Play the sound at the players current location
-            p.playSound(p.getLocation(), sound, 1, 1);
-        }
+        p.sendMessage(getMessage("Warning"));
+        //Play the warning sound from the config
+        playSound("WarningSound", XSound.ENTITY_PLAYER_LEVELUP);
     }
 
     /**
@@ -131,6 +127,15 @@ public class AFKPlusPlayer {
      */
     public boolean isAFK() {
         return isAFK;
+    }
+
+    /**
+     * Check if the players AFK state is fake
+     *
+     * @return returns true if the player is both AFK and the AFK state is faked
+     */
+    public boolean isFakeAFK() {
+        return isAFK && isFakeAFK;
     }
 
     /**
@@ -152,18 +157,35 @@ public class AFKPlusPlayer {
             //Player isn't online, stop here
             return;
         }
+        //Get the command and message for the AFK start event
+        String command = plugin.getConfig().getString("Commands.AFKStart");
+        String message = getMessage("Broadcast.Start");
         //Call the AKFStart event
-        AFKStartEvent event = new AFKStartEvent(this);
+        AFKStartEvent event = new AFKStartEvent(this, command, message);
         Bukkit.getPluginManager().callEvent(event);
         if (event.isCancelled()) {
             return;
         }
         //Broadcast the AFK start message
-        String message = plugin.config.getMessage("Broadcast.Start")
-                .replace("{PLAYER}", getName());
-        broadcast(message);
+        broadcast(event.getBroadcastMessage().replace("{PLAYER}", getName()));
+        //Run AFK command
+        runCommand(event.getCommand());
+        //Play the AFK start sound
+        playSound("AFKStartSound", XSound.BLOCK_ANVIL_HIT);
         //Start the AFK
         forceStartAFK();
+    }
+
+    /**
+     * Overloads {@link #startAFK()} to set the AFK as fake
+     *
+     * @param isFake true if the player is to be set as "fake" AFK
+     */
+    public void startAFK(boolean isFake) {
+        startAFK();
+        //Check to make sure that AFK did start e.g. wasn't cancelled by the event API
+        if (isAFK)
+            isFakeAFK = isFake;
     }
 
     /**
@@ -177,6 +199,8 @@ public class AFKPlusPlayer {
         afkStart = System.currentTimeMillis();
         //Set the player as AFK
         isAFK = true;
+        //Update the players AFK status with the essentials plugin
+        updateEssentialsAFKState();
     }
 
     /**
@@ -188,21 +212,23 @@ public class AFKPlusPlayer {
             //Player isn't online, stop here
             return;
         }
+        //Get the command and broadcast message
+        String command = plugin.getConfig().getString("Commands.AFKStop");
+        String message = getMessage("Broadcast.Stop");
         //Call the AKFStop event
-        AFKStopEvent event = new AFKStopEvent(this);
+        AFKStopEvent event = new AFKStopEvent(this, command, message);
         Bukkit.getPluginManager().callEvent(event);
         if (event.isCancelled()) {
             return;
         }
+        runCommand(event.getCommand());
         //Get a string that is the user friendly version of how long the player was AFK
         //This will replace the {TIME} variable, if present
-        String afkTime = plugin.prettyTime.format(plugin.reduceDurationList
+        String afkTime = plugin.prettyTime.formatDuration(plugin.reduceDurationList
                 (plugin.prettyTime.calculatePreciseDuration(new Date(afkStart))));
-        String message = plugin.config.getMessage("Broadcast.Stop")
-                .replace("{PLAYER}", getName()).replace("{TIME}", afkTime);
-        broadcast(message);
+        broadcast(event.getBroadcastMessage().replace("{PLAYER}", getName()).replace("{TIME}", afkTime));
+        //Stop the AFK status
         forceStopAFK();
-
     }
 
     /**
@@ -211,14 +237,20 @@ public class AFKPlusPlayer {
     public void forceStopAFK() {
         //Disable creative mode, and go back to previous game mode before AFK.
         this.disableSafeGameMode();
+        //Record the new value for the time AFK statistic
+        if (isAFK())
+            recordTimeStatistic();
         //Reset warning
         isWarned = false;
         //Set player as no longer AFK
         isAFK = false;
+        isFakeAFK = false;
         //Disable inactivity to allow the interact to register
 //        isInactive = false;
         //Interact to update the last interact value
         interact();
+        //Update the players AFK status with the essentials plugin
+        updateEssentialsAFKState();
     }
 
     /**
@@ -232,15 +264,16 @@ public class AFKPlusPlayer {
             return;
         }
         boolean vanish = plugin.getConfig().getBoolean("Broadcast.Vanish");
-        if (!vanish && isVanished()) {
-            return;
-        }
-        Player player = Bukkit.getPlayer(getUUID());
         boolean console = plugin.getConfig().getBoolean("Broadcast.Console");
         boolean otherPlayers = plugin.getConfig().getBoolean("Broadcast.OtherPlayers");
         boolean self = plugin.getConfig().getBoolean("Broadcast.Self");
+        if (!vanish && isVanished()) {
+            //Stop the broadcast from going to other players, but it still shows to the player and console
+            otherPlayers = false;
+        }
+        Player player = Bukkit.getPlayer(getUUID());
         if (console) {
-            plugin.getLogger().info(msg);
+            Bukkit.getLogger().info(msg);
         }
         if (otherPlayers) {
             for (Player p : Bukkit.getOnlinePlayers()) {
@@ -259,12 +292,12 @@ public class AFKPlusPlayer {
      * Runs the action command on this player
      */
     public void takeAction() {
-        String command = plugin.getConfig().getString("Action").replace("[PLAYER]", Bukkit.getPlayer(uuid).getName());
+        String command = plugin.getConfig().getString("Commands.Action");
         AFKActionEvent event = new AFKActionEvent(this, command);
         Bukkit.getPluginManager().callEvent(event);
         if (!event.isCancelled()) {
             forceStopAFK();
-            Bukkit.getScheduler().runTask(plugin, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), event.getAction()));
+            runCommand(event.getCommand());
         }
     }
 
@@ -278,7 +311,8 @@ public class AFKPlusPlayer {
 //        if (isInactive)
 //            return;
         lastInteract = System.currentTimeMillis();
-        if (isAFK)
+        //Only take AFK stopping action if the player is AFK and not fake AFK
+        if (isAFK && !isFakeAFK)
             stopAFK();
     }
 
@@ -299,6 +333,107 @@ public class AFKPlusPlayer {
     }
 
     /**
+     * Get the total time that a player has been AFK
+     * This is the sum of all time that the player has been AFK
+     *
+     * @return The total time spent AFK, 0 if there is no record for this player
+     */
+    public long getTotalTimeAFK() {
+        //Get or create the statistics file
+        File f = new File(plugin.getDataFolder(), "statistics.yml");
+        if (!f.exists()) {
+            return 0L;
+        }
+        YamlConfiguration statistics = YamlConfiguration.loadConfiguration(f);
+        //Grab the current value of the statistic so that we can add to it, or get 0L if there is no current value
+        return statistics.getLong(getName() + ".TimeSpentAFK", 0L);
+    }
+
+    /**
+     * Updates the players current AFK State within the essentials plugin
+     */
+    private void updateEssentialsAFKState() {
+        //Update the AFK state with essentials if it is installed
+        if (!Bukkit.getPluginManager().isPluginEnabled("Essentials"))
+            return;
+        EssentialsAFKHook essHook = new EssentialsAFKHook();
+        essHook.setAFK(getUUID(), isAFK);
+    }
+
+    /**
+     * Handles the running of a command with a player variable, this is used for AFK start/stop/warn/action commands
+     *
+     * @param command The command to be run with "[PLAYER]" in place of the players name
+     */
+    private void runCommand(String command) {
+        //Ignore the command if it is blank, this is so that start/stop/warn events dont need to have commands
+        if (command.equals(""))
+            return;
+        //Replace the player variable with the players name
+        String cmd = command.replace("[PLAYER]", getName());
+        //Dispatch the command on the next game tick
+        Bukkit.getScheduler().runTask(plugin, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd));
+    }
+
+    /**
+     * Uses the PAPI LapisCore integration to attempt placeholder replacement
+     *
+     * @param key The key for the message in the messages.yml
+     * @return the formatted message
+     */
+    private String getMessage(String key) {
+        return plugin.config.getMessage(key, Bukkit.getOfflinePlayer(getUUID()));
+    }
+
+    /**
+     * Plays a sound from the config or the default sound if its not available
+     *
+     * @param pathToSound The path to the sounds name in the config.yml
+     * @param def         The sound to be used if the sound in the config isn't valid
+     */
+    private void playSound(String pathToSound, XSound def) {
+        Player p = Bukkit.getPlayer(getUUID());
+        if (p == null || !p.isOnline())
+            return;
+        String soundName = plugin.getConfig().getString(pathToSound);
+        if ("".equals(soundName) || soundName == null)
+            return;
+        XSound sound;
+        Optional<XSound> retrievedSound = XSound.matchXSound(soundName);
+        sound = retrievedSound.orElse(def);
+        sound.playSound(p);
+    }
+
+    /**
+     * Records the time spent AFK and adds it to the already existing value in the statistics file
+     */
+    private void recordTimeStatistic() {
+        //Get or create the statistics file
+        File f = new File(plugin.getDataFolder(), "statistics.yml");
+        if (!f.exists()) {
+            try {
+                if (!f.createNewFile())
+                    throw new IOException("Failed to create " + f.getName());
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        YamlConfiguration statistics = YamlConfiguration.loadConfiguration(f);
+        //Grab the current value of the statistic so that we can add to it, or get 0L if there is no current value
+        Long currentTimeSpendAFK = statistics.getLong(getName() + ".TimeSpentAFK", 0L);
+        //Calculate the amount of time that the player was AFK for
+        Long timeAFK = System.currentTimeMillis() - afkStart;
+        //Set the value to be the old value plus the most recent amount of time AFK
+        statistics.set(getName() + ".TimeSpentAFK", currentTimeSpendAFK + timeAFK);
+        //Save the file
+        try {
+            statistics.save(f);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
      * This is the runnable that detects players who need to be set as AFK, warned or acted upon
      * It is run every second by default
      * This should not be used else where
@@ -309,22 +444,29 @@ public class AFKPlusPlayer {
         return () -> {
             if (Bukkit.getOfflinePlayer(getUUID()).isOnline()) {
                 if (isAFK) {
+                    boolean isAtPlayerRequirement;
+                    int playersRequired = plugin.getConfig().getInt("ActionPlayerRequirement");
+                    if (playersRequired == 0) {
+                        isAtPlayerRequirement = true;
+                    } else {
+                        isAtPlayerRequirement = Bukkit.getOnlinePlayers().size() > playersRequired;
+                    }
                     //Get the values that need to be met for warnings and action
                     Integer timeToWarning = plugin.perms.getPermissionValue(uuid, Permission.TimeToWarning.getPermission());
                     Integer timeToAction = plugin.perms.getPermissionValue(uuid, Permission.TimeToAction.getPermission());
                     //Get the number of seconds since the player went AFK
-                    Long secondsSinceAFKStart = (System.currentTimeMillis() - afkStart) / 1000;
-                    //Don't check if we need to warn the player if waring is disabled  or there is a permission error
-                    if (!timeToWarning.equals(-1) && !timeToWarning.equals(0)) {
+                    long secondsSinceAFKStart = (System.currentTimeMillis() - afkStart) / 1000;
+                    //Don't check if we need to warn the player if waring is disabled
+                    if (!timeToWarning.equals(-1)) {
                         //Check for warning
                         if (!isWarned && secondsSinceAFKStart >= timeToWarning) {
                             Bukkit.getScheduler().runTask(plugin, this::warnPlayer);
                         }
                     }
-                    //Check if the player can have an action taken or if there is a permission error
-                    if (!timeToAction.equals(-1) && !timeToAction.equals(0)) {
-                        //Check for action
-                        if (secondsSinceAFKStart >= timeToAction) {
+                    //Check if the player can have an action taken
+                    if (!timeToAction.equals(-1)) {
+                        //Check for action and if we are taking action yet
+                        if (secondsSinceAFKStart >= timeToAction && isAtPlayerRequirement) {
                             Bukkit.getScheduler().runTask(plugin, this::takeAction);
                         }
                     }
@@ -337,10 +479,10 @@ public class AFKPlusPlayer {
                         return;
                     }
                     //Get the number of seconds since the last recorded interact
-                    Long secondsSinceLastInteract = (System.currentTimeMillis() - lastInteract) / 1000;
+                    long secondsSinceLastInteract = (System.currentTimeMillis() - lastInteract) / 1000;
                     //Set them as AFK if it is the same or longer than the time to AFK
                     if (secondsSinceLastInteract >= timeToAFK) {
-                        Bukkit.getScheduler().runTask(plugin, this::startAFK);
+                        Bukkit.getScheduler().runTask(plugin, (Runnable) this::startAFK);
                     }
                 }
             }
@@ -405,7 +547,7 @@ public class AFKPlusPlayer {
     
     /**
      * Setter for previousGameMode
-     * @param previousGameMode
+     * @param previousGameMode Player's preivous game mode (SafeAfk)
      */
     public void setPreviousGameMode(GameMode previousGameMode) {
         this.previousGameMode = previousGameMode;

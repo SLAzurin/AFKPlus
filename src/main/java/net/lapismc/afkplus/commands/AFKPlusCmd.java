@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Benjamin Martin
+ * Copyright 2021 Benjamin Martin
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,7 +46,6 @@ public class AFKPlusCmd extends AFKPlusCommand {
             sender.sendMessage(primary + "Spigot: " + secondary + "https://goo.gl/yeMGBL");
             sender.sendMessage(primary + "If you need help use " + secondary + "/afkplus help");
             sender.sendMessage(bars + bars + bars);
-            return;
         } else if (args.length == 1) {
             // /afkplus update
             if (args[0].equalsIgnoreCase("update")) {
@@ -62,17 +61,17 @@ public class AFKPlusCmd extends AFKPlusCommand {
                     //no update available
                     sendMessage(sender, "Updater.NoUpdate");
                 }
-                return;
                 // /afkplus help
             } else if (!args[0].equalsIgnoreCase("player")) {
                 sendHelp(sender);
             }
             // /afkplus player
-        }
-        if (args[0].equalsIgnoreCase("player")) {
-            playerCommand(sender, args);
         } else {
-            sendHelp(sender);
+            if (args[0].equalsIgnoreCase("player")) {
+                playerCommand(sender, args);
+            } else {
+                sendHelp(sender);
+            }
         }
     }
 
